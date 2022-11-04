@@ -1,0 +1,530 @@
+---
+title: Solution of Lasso Regression by Newton's method
+author: Chen Zhiyuan
+documentclass: ctexart
+keywords:
+  - 中文
+  - R Markdown
+output:
+  rticles::ctex:
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+classoption: "hyperref,"
+geometry:
+- tmargin=2cm
+- bmargin=2cm
+- lmargin=2cm
+- rmargin=2cm
+---
+
+\newpage
+
+# 函数编写与单次实验检验
+
+编写的计算函数放在文件czy_midfuncs.r中，正文中只是调用；并展示在附录中。
+
+## 初始化数据
+
+```{r}
+library(mvtnorm)         # 用于生成多元正态分布的package
+# 真值参数初始化
+n <- 100
+p <- 6
+e.sd <- 2
+beta <- c(1, 0.8, 0.6, 0, 0, 0)               
+e <- rnorm(n, 0, e.sd)
+x <- rmvnorm(n, rep(0,p), diag(p))
+y <- x %*% beta + e
+d = 0.01
+thd2 = 1e-4
+thd1 <- 1e-4
+M <- 10000
+# 初始化beta0，其值为最小二乘估计
+# 不把beta0放在函数里面是为了重复模拟减少计算量，所以当函数用在其他数据集上时需要单独初始化
+beta0 <- solve(t(x)%*%x)%*%t(x)%*%y
+```
+
+## 压缩估计：从LQA算法出发求解Lasso
+
+核心迭代式： $$
+\beta^{(k+1)} = [X'X + n\Sigma_\lambda(\beta^{(k)})]^{-1}
+$$
+
+```{r}
+source("czy_midfuncs.r")                            # 自编函数
+opt.lam <- GCV.lambda(x, y, seq(0.1,1,0.01))        # 用GCV选出的最优值
+LASSO.LQA(beta0, x, y, opt.lam, thd1, M, thd2)      # 在迭代过程中把beta分量压缩为零
+LASSO.LQA2(beta0, x, y, opt.lam, thd1, M, thd2)     # 在收敛后、输出前把beta分量压缩为零
+LASSO.MM(beta0, x, y, opt.lam, d, thd1, thd2)       # 不用large value代替被压缩为零的beta分量，而是在sigma矩阵对角线元素的分母上加上一个较小的数
+Adaptive.Lasso(beta0, x, y, opt.lam, d, thd1, 0.05)
+```
+
+从少次重复的单次实验看：\
+(1) LQA的两种实现方式结果没有区别。\
+(2) LQA和MM的估计结果有差距，但并不大。\
+(3) Adaptive LASSO的稳定性较差，跳出阈值需设定在0.05\~0.1才会收敛，所以选择了理论上更稳定的MM来估计，并且规定最多迭代70次（LQA也已经尝试过，在重复实验中稳定性确实不如MM，在0.01水平尚不能收敛，此处不再展示。）；且结果与LASSO相差较大。
+
+## 变量选择：最优子集选择与AIC/BIC
+
+AIC与BIC准则： $$
+\begin{aligned}
+AIC &=\frac{1}{n\hat\sigma^2}(RSS+2d\hat\sigma^2) \\
+BIC &=\frac{1}{n}(RSS+log(n)d\hat\sigma^2)
+\end{aligned}
+$$
+
+```{r}
+Best.Subset(x,y,criterion = 'AIC')
+Best.Subset(x,y,criterion = 'BIC')
+```
+
+从单次实验的结果看，基于AIC和BIC准则的最优子集选择模型效果相当好。
+
+# 重复实验模拟
+
+模拟1000次$\Sigma$为单位阵，$\epsilon$的方差为2的情况
+
+## 样本量为100
+
+```{r}
+# 初始化
+n <- 100
+p <- 6
+e.sd <- 2
+x.sigma <- diag(p)
+realbeta <- c(1, 0.8, 0.6, 0, 0, 0)
+d = 0.01
+thd2 = 1e-6
+thd1 <- 1e-4
+M <- 10000
+lambdas <- seq(0.1, 0.7, 0.01)  # 从已经运行的实验中得出的该模拟条件下的经验范围，用以加快运行速度
+rep.num <- 1000
+# 模拟函数进行重复实验，只需指定epsilon的标准差，X的协方差矩阵，
+# 选择最优lambda的范围和MM估计中的参数d
+aaa <- simu(e.sd, x.sigma, lambdas, d)
+print(as.matrix(aaa))
+```
+
+可以看到lasso的估计结果差强人意，adaptive lasso的correct大于lasso，但incorrect也大于lasso。\
+基于aic和bic准则的最优子集选择表现很棒，几乎能完全选出正确模型；而BIC无论是correct还是incorrect都高于AIC，这是正常的，因为BIC的惩罚更重，更容易把系数压缩为零。
+
+## 样本量为200
+
+```{r}
+n <- 200
+bbb <- simu(e.sd, x.sigma, lambdas, d)
+print(as.matrix(bbb))
+```
+
+当样本量从100增加到200时，incorrect的改善非常明显：四种方法的incorrect都减小了；而lasso，AIC和BIC的correct略有提高，adaptive lasso的correct却下降了。
+
+# 扩展条件的模拟
+
+每次只改变一个条件，其他条件都沿用重复实验中的初始化条件（样本量沿用n = 200）
+
+## 当epsilon的方差更大时
+
+```{r}
+e.sds <- seq(2, 9, 1)
+correct.sd <- data.frame()
+incorrect.sd <- data.frame()
+for(new.e.sd in e.sds){
+  aaa <- simu(new.e.sd, x.sigma, seq(0.1, 2, 0.01), 0.12)    # 根据提前模拟，标准差=12时最优lambda大概在1.8~1.9，上限扩大到2够用了
+  correct.sd <- rbind.data.frame(correct.sd, aaa[1,])
+  incorrect.sd <- rbind.data.frame(incorrect.sd, aaa[2,])
+}
+par(mfrow=c(2,2))
+plot(e.sds, correct.sd$lasso, type = "o", xlab = "sd", ylab = "lasso", main = "correct")
+plot(e.sds, correct.sd$adaptive, type = "o", xlab = "sd", ylab = "adaptive lasso", main = "correct")
+plot(e.sds, correct.sd$aic, type = "o", xlab = "sd", ylab = "aic", main = "correct")
+plot(e.sds, correct.sd$bic, type = "o", xlab = "sd", ylab = "bic", main = "correct")
+par(mfrow=c(2,2))
+plot(e.sds, incorrect.sd$lasso, type = "o", xlab = "sd", ylab = "lasso", main = "incorrect")
+plot(e.sds, incorrect.sd$adaptive, type = "o", xlab = "sd", ylab = "adaptive lasso", main = "incorrect")
+plot(e.sds, incorrect.sd$aic, type = "o", xlab = "sd", ylab = "aic", main = "incorrect")
+plot(e.sds, incorrect.sd$bic, type = "o", xlab = "sd", ylab = "bic", main = "incorrect")
+
+```
+
+(1) 首先遇到到的耐人寻味的问题是当方差增大时，R会提醒我的LASSO的$\beta^{(k+1)} = [X'X+n\Sigma_\lambda(\beta^{(k)})]^{-1}$部分逆不存在，这是由于我在MM算法中在分母上放置的d太小（0.01），有关d对MM估计的影响将在3.3中讨论。\
+(2) 当方差增大时，lasso和adaptive lasso的correct均呈波动下降趋势，但adaptive lasso的correct更高；AIC和BIC的correct竟然呈波动上升趋势）。这说明在epsilon高方差时，基于AIC和BIC的最优子集选择方法有好的表现，而adaptive lasso要略优于lasso。\
+(3) 当方差增大时，四种方法的incorrect都增大了，但是adaptive lasso比lasso更高，说明此时前者的压缩更狠；而BIC的incorrect却略低于AIC，从这次实验的结果来看，基于BIC的最优子集选择应当是高方差情形下的最优方法。
+
+## 当X不独立且变量间相关系数增大时
+
+```{r}
+correct.rho <- data.frame()
+incorrect.rho <- data.frame()
+rhos <- seq(0.2, 0.9, 0.1)
+for(rho in rhos){
+  x.sig <- matrix(rep(rho,p^2), p, p) - diag(rep(rho, p)) + diag(p)
+  x <- rmvnorm(n, rep(0,p), x.sig)
+  y <- x %*% beta + e
+  aaa <- simu(e.sd, x.sig, seq(0.1, 2, 0.01), 0.1)  
+  correct.rho <- rbind.data.frame(correct.rho, aaa[1,])
+  incorrect.rho <- rbind.data.frame(incorrect.rho, aaa[2,])
+}
+par(mfrow=c(2,2))
+plot(rhos, correct.rho$lasso, type = "o", xlab = "rho", ylab = "lasso", main = "correct")
+plot(rhos, correct.rho$adaptive, type = "o", xlab = "rho", ylab = "adaptive lasso", main = "correct")
+plot(rhos, correct.rho$aic, type = "o", xlab = "rho", ylab = "aic", main = "correct")
+plot(rhos, correct.rho$bic, type = "o", xlab = "rho", ylab = "bic", main = "correct")
+par(mfrow=c(2,2))
+plot(rhos, incorrect.rho$lasso, type = "o", xlab = "rho", ylab = "lasso", main = "incorrect")
+plot(rhos, incorrect.rho$adaptive, type = "o", xlab = "rho", ylab = "adaptive lasso", main = "incorrect")
+plot(rhos, incorrect.rho$aic, type = "o", xlab = "rho", ylab = "aic", main = "incorrect")
+plot(rhos, incorrect.rho$bic, type = "o", xlab = "rho", ylab = "bic", main = "incorrect")
+```
+
+当x的变量间相关系数增大时：\
+(1) lasso和adaptive lasso的correct都下降；AIC和BIC的correct剧烈波动，看不出什么明显的趋势。 (2) 四种方法的incorrect都上升，其中AIC和BIC均匀正常上升；lasso和adaptive lasso则开始保持不变，当rho \> 0.8后突然大幅度上升。
+
+## 当d变化时
+
+d是在MM算法中加在矩阵$\Sigma_\lambda(\beta^{(k)})$对角线元素分母上的一个较小的常数，使得当被压缩为零的$\beta_k$分量代入对角线元素分母时，对角线元素的值不会过大而导致矩阵失真。下面来讨论d的大小变化对Lasso估计有何影响。
+
+```{r}
+correct.d <- data.frame()
+incorrect.d <- data.frame()
+ds <- c(1, 0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.005)
+for(new.d in ds){
+  aaa <- simu(e.sd, x.sigma, seq(0.1, 1, 0.01), new.d)    
+  correct.d <- rbind.data.frame(correct.d, aaa[1,])
+  incorrect.d <- rbind.data.frame(incorrect.d, aaa[2,])
+}
+par(mfrow=c(2,2))
+plot(ds, correct.d$lasso, type = "o", xlab = "d", ylab = "lasso", main = "correct")
+plot(ds, correct.d$adaptive, type = "o", xlab = "d", ylab = "adaptive lasso", main = "correct")
+plot(ds, incorrect.d$lasso, type = "o", xlab = "d", ylab = "lasso", main = "incorrect")
+plot(ds, incorrect.d$adaptive, type = "o", xlab = "d", ylab = "adptive lasso", main = "incorrect")
+```
+
+### 结果讨论
+
+可以看到当d变大时：\
+(1) lasso的correct和incorrect都迅速下降然后趋于不变，这说明当d \> 0.2时MM算法估计的lasso结果是失真的。\
+(2) adaptive lasso的correct呈现均匀下降的趋势，incorrect在剧烈波动后也立刻下降然后不变。在correct上可能是adaptive的自我调节性质起了对抗失真的作用，但在incorrect上依然失真。
+
+### 结论
+
+在 3.1 改变方差的实验中已经发现当d太小时算法可能不时出现不收敛的情况，给我们的实验带来麻烦。而3.3的结果告诉我们：即使如此也不能把实验中的d设置得太大，否则当correct和incorrect都失真时（比如incorrect全为0）也看不出任何结果。\
+所以，我们需要选出一个大小适中的d使得3.1和3.2的实验能正常运行。回到之前的结果，我们从初始条件的单次实验知道0.01是一个估计不错的d，当需要增加它时，可以先尝试0.02，0.03，0.05和0.1，一定不要超过0.2。
+
+## 在非设计数据上的模拟：与标准结果对比
+
+为了测试编写的函数是否具有良好的泛化能力，决定在经典的波士顿房价数据集上检验其选择变量的效果，而标准结果则参考glmnet包的lasso和最优子集选择函数。
+
+### 导入数据
+
+设计阵不包括chas这一类别变量，因为自己编写的函数中没有专门设置虚拟变量；同时添加一列全为1的向量用于估计截距项（仅用于自编lasso）。
+
+```{r include=FALSE}
+library(MASS)           # 导入波士顿房价数据集
+library(leaps)
+library(glmnet)         # 导入标准的lasso等方法库
+attach(Boston)
+y.boston <- as.matrix(medv)
+x.boston <- as.matrix(Boston[,c(-4,-14)])
+x.boston.in <- cbind(x.boston, rep(1,dim(x.boston)[1]))   # 添加对截距项的估计
+```
+
+### 自编函数的选择变量结果
+
+```{r}
+# 用自编lasso等函数进行变量选择
+opt.lam <- GCV.lambda(x,y,seq(0.1,2,0.01))
+beta0.boston <- solve(t(x.boston.in)%*%x.boston.in)%*%t(x.boston.in)%*%y.boston
+abs(LASSO.MM(beta0.boston, x.boston.in, y.boston, opt.lam, d, thd1, thd2)) < 0.005
+Best.Subset(x.boston,y.boston,criterion = 'AIC')
+Best.Subset(x.boston,y.boston,criterion = 'BIC')
+```
+
+自编的Lasso函数将indus，nox和age三个变量的系数估计为零，而基于AIC和BIC的最优子集选择则没有丢弃任何一个变量。
+
+### 库函数的变量选择结果
+
+```{r}
+# 使用glmnet和leaps库的参考结果
+# lasso
+lso.cv <- cv.glmnet(x.boston, y.boston, alpha=1)
+lso.fit <- glmnet(x.boston, y.boston, alpha=1, lambda = lso.cv$lambda.min)
+lso.fit$beta
+# best subset
+full.fit <- regsubsets(medv~.-chas, Boston, nvmax = 12)
+full.summary <- summary(full.fit)
+cat("根据BIC最小选出的最优模型个数为：", which.min(full.summary$bic))
+
+print(full.summary$outmat)
+```
+
+使用库函数的lasso将indus和age估计为零；而当BIC最小时的最优子集选择模型含变量数为10个，根据结果可知丢弃的变量为indus和age。这一结果和自编lasso相当接近。\
+在Boston数据集上的测试表示：尽管BIC在先前实验中的correct和incorrect都表现得比lasso更好，但在这个实际问题的估计中lasso和参考结果更接近。
+
+# 参考文献
+
+[1] 李高荣,吴密霞编著. 多元统计分析. 科学出版社, 2021.
+
+\newpage
+
+# 附录
+
+## Lasso的实现
+
+### 用GCV准则选择最优λ
+
+```{r}
+GCV.lambda <- function(x, y, lambdas){
+  # 此方法用GCV方法选出最优的lambdas（只能选出一个）
+  # 传入的lambda为一个范围向量
+  p <- dim(x)[2]
+  GCV <- vector(length = length(lambdas))
+  q = 1
+  for(lambda in lambdas){
+    beta.gcv <- LASSO.MM(beta0, x, y, lambda, d, thd1, thd2)               # 对输入的lambda拟合lasso
+    P <- x %*% solve(t(x)%*%x + n*diag(as.vector(lambda/abs(beta.gcv)))) %*% t(x)   # 计算帽子矩阵
+    d <- sum(diag(P))                                                               # 计算帽子矩阵的迹
+    e2 <- sum((y-x%*%beta.gcv)^2)                                                   # 计算lasso估计的RSS
+    gcv <- e2 / (1-d/n)^2                                                           # 计算GCV
+    GCV[q] <- gcv
+    q = q + 1
+  }
+  bestlambda <- lambdas[which.min(GCV)]                                             # 找出使GCV最小的lambda
+  return(bestlambda)
+}
+```
+
+### LQA算法：两种实现
+
+```{r}
+LASSO.LQA <- function(beta0, x, y, lambda, thd1, M, thd2){
+  # 用LQA算法计算lasso的数值解
+  # beta0为初始系数向量（p维），n为样本量，p为变量维数，lambda为调节参数的待选范围，thd1为将β分量压缩为0的阈值，thd2为停止迭代的阈值
+  # 在迭代过程中将β小于阈值的分量压缩为零
+  n <- dim(x)[1]
+  p <- dim(x)[2]
+  sigma.func <- function(beta){                   # Σ矩阵
+    beta.copy = beta
+    for(i in 1:p){
+      if(beta.copy[i] == 0) beta.copy[i] <- M     # 为使矩阵逆存在，将1/0用一个很大的数M代替
+      else beta.copy[i] <- 1/abs(beta.copy[i])
+    }
+    sigma <- diag(as.vector(lambda*beta.copy))    # 对角线为lambda_i / |beta|
+    return(sigma)
+  }
+  
+  beta <- beta0                                   # 初值为最小二乘估计
+  k = 0
+  repeat{
+    sigma <- sigma.func(beta)                        
+    newbeta <- solve( t(x)%*%x + n*sigma ) %*% t(x) %*% y  # 计算beta_k+1
+    for(beta.i in newbeta){                                # 当其分量足够小时将其压缩为0
+      if(abs(beta.i) < thd1) beta.i <- 0
+    }
+    if(t(newbeta-beta)%*%(newbeta-beta) < thd2) break      # 当两次迭代的向量差距(差的二范数)足够小时停止迭代
+    beta <- newbeta
+    k = k + 1
+    #cat("\r", k)                                           # 输出迭代次数
+  }
+  return(beta) 
+}
+
+LASSO.LQA2 <- function(beta0, x, y, lambda, thd1, M, thd2){
+  # 此函数在迭代过程中不将β小于阈值的分量压缩为零，而在收敛后再将小于阈值的分量压缩为零
+  # 其余部分与LASSO.LQA相同
+  n <- dim(x)[1]
+  p <- dim(x)[2]
+  sigma.func <- function(beta){
+    sigma <- diag(as.vector(lambda/abs(beta)))
+    return(sigma)
+  }
+  beta <- beta0
+  k = 0
+  repeat{
+    sigma <- sigma.func(beta)                        
+    newbeta <- solve( t(x)%*%x + n*sigma ) %*% t(x) %*% y
+    if(t(newbeta-beta)%*%(newbeta-beta) < thd2) break          
+    beta <- newbeta
+    k = k + 1
+    #cat("\r", k)
+  }
+  for(beta.i in newbeta){                                  # 收敛后判断：当其分量足够小时将其压缩为0，再返回lasso估计
+    if(abs(beta.i) < thd1) beta.i <- 0
+  }
+  return(beta) 
+}
+```
+
+### MM算法：一点点优化
+
+```{r}
+LASSO.MM <- function(beta0, x, y, lambda, d, thd1, thd2){
+  # 此函数在迭代过程中将β小于阈值的分量压缩为零，但不将1/|β_k|替换为M，而是在分母上加上一个较小的数d，使得矩阵的对角线元素不会太大
+  # 稳定性更好
+  n <- dim(x)[1]
+  p <- dim(x)[2]
+  sigma.func <- function(beta){                   
+    beta.copy = beta
+    for(i in 1:p){    
+      beta.copy[i] <- 1/(abs(beta.copy[i]) + d)           # 在分母上加上一个较小数d以保证矩阵可逆
+    }
+    sigma <- diag(as.vector(lambda*beta.copy))
+    return(sigma)
+  }
+  beta <- beta0
+  k = 0
+  repeat{
+    sigma <- sigma.func(beta)                        
+    newbeta <- solve( t(x)%*%x + n*sigma ) %*% t(x) %*% y  
+    for(beta.i in newbeta){                                
+      if(abs(beta.i) < thd1) beta.i <- 0                           # 当其分量足够小时将其压缩为0
+    }
+    if(t(newbeta-beta)%*%(newbeta-beta) < thd2) break      
+    beta <- newbeta
+    k = k + 1
+    #cat("\r", k)                                           
+  }
+  return(beta) 
+}
+```
+
+### Adaptive Lasso
+
+```{r}
+Adaptive.Lasso <- function(beta0, x, y, lambda0, d, thd1, thd2){
+  # 用MM算法计算adaptive lasso的数值解，因为相对LQA更稳定
+  # 这里用每次迭代的1/|β_k|作为计算β_k+1时的权重而非一直用LS，是考虑到LS可能估计不好，而每次迭代的估计会愈来愈精确
+  # 指数姑且取1
+  n <- dim(x)[1]
+  p <- dim(x)[2]
+  sigma.func <- function(beta){                   
+    lambda <- lambda0/abs(beta)                        #用每次迭代的1/|β_k|代替固定的一个lambda值
+    beta.copy = beta
+    for(i in 1:p){    
+      beta.copy[i] <- 1/(abs(beta.copy[i]) + d)           
+    }
+    sigma <- diag(as.vector(lambda*beta.copy))
+    return(sigma)
+  }
+  beta <- beta0
+  k = 0
+  for(l in 1:70){                                       # 因为adaptive lasso在实际中更难收敛，故设定迭代上限70次
+    sigma <- sigma.func(beta)                        
+    newbeta <- solve( t(x)%*%x + n*sigma ) %*% t(x) %*% y  
+    for(beta.i in newbeta){                                
+      if(abs(beta.i) < thd1) beta.i <- 0
+    }
+    if(t(newbeta-beta)%*%(newbeta-beta) < thd2) break      
+    beta <- newbeta
+    k = k + 1
+    #cat("\r", k)                                           
+  }
+  return(beta)
+}
+```
+
+## 最优子集选择：基于AIC与BIC
+
+```{r}
+Best.Subset <- function(x, y, criterion){
+  # 用最优子集选择进行变量选择
+  # criterion是可选判断准则，此函数提供AIC和BIC
+  # x[,i]代表列值，即Xi
+  n <- dim(x)[1]
+  p <- dim(x)[2]
+  models <- list()
+  for(i in 1:p){
+    # 拟合所有包含i个变量的模型，用RSS最小准则选出最优的model_i
+    choice <- combn(p, i)                         # 所有组合
+    RSS1 <- vector(length = choose(p,i))          # 存放所有组合拟合结果
+    for(j in choose(p,i)){
+      x1 <- x[,choice[,j]]
+      e1 <- y - x1 %*% solve(t(x1)%*%x1) %*% t(x1) %*% y
+      rss1 <- t(e1) %*% e1
+      RSS1[j] <- rss1                             # 计算所有组合的rss并存放（同时得到了全模型RSS，后面会用到）
+    }
+    bestchoice <- choice[,which.min(RSS1)]        # 按rss最小选出最优model_i
+    models[[i]] <- bestchoice[1:i]
+  }
+  # 计算p个最优model_i的RSS和β方差估计，为计算AIC、BIC做准备
+  RSS2 <- vector(length = p)
+  D2 <- 1:p
+  q = 1
+  for(model in models){
+    x2 <- x[,model]
+    d = length(model)
+    e2 <- y - x2 %*% solve(t(x2)%*%x2) %*% t(x2) %*% y    # 残差
+    rss2 <- t(e2) %*% e2                                  # 部分变量模型的RSS
+    RSS2[q] <- rss2
+    q = q + 1
+  }
+  SIG2 <- rep(RSS2[p]/(n-p), p)
+  if(criterion=='AIC'){
+    AIC <- (RSS2 + 2*D2*SIG2)/(n*SIG2)
+    bestmodel <- models[[which.min(AIC)]]
+  }
+  
+  if(criterion=='BIC'){
+    BIC <- (RSS2 + log(n)*D2*SIG2)/n
+    bestmodel <- models[[which.min(BIC)]]
+  }
+  
+  return(bestmodel)
+}
+```
+
+## 模拟函数：为减少正文代码量而存在
+
+```{r}
+simu <- function(e.sd, x.sigma, lambdas, d)
+{
+  # 只设计了epsilon的标准差，X的协方差矩阵，选择最优lambda的范围和MM估计中的参数d作为可改变变量
+  # 因为接下来的不同条件的实验只会改变这些参数
+  # 其他参数指定为全局变量
+  correct.lasso.lqa <- c()
+  incorrect.lasso.lqa <- c()
+  correct.lasso.mm <- c()
+  incorrect.lasso.mm <- c()
+  correct.bic <- rep(0, rep.num)
+  incorrect.bic <- rep(0, rep.num)
+  correct.aic <- rep(0, rep.num)
+  incorrect.aic <- rep(0, rep.num)
+  correct.adaptivelasso <- c()
+  incorrect.adaptivelasso <- c()
+  for(i in 1:rep.num){
+    # 更新
+    e <- rnorm(n, 0, e.sd)
+    x <- rmvnorm(n, rep(0,p), x.sigma)
+    colnames(x) <- c("x1","x2","x3","x4","x5","x6")
+    y <- x %*% realbeta + e
+    beta0 <- solve(t(x)%*%x)%*%t(x)%*%y
+    opt.lam <- GCV.lambda(x,y,lambdas)
+    # mm
+    correct.lasso.mm[i] <- sum(abs(LASSO.MM(beta0, x, y, opt.lam, d, thd1, thd2))[4:6]<0.005)
+    incorrect.lasso.mm[i] <- sum(abs(LASSO.MM(beta0, x, y, opt.lam, d, thd1, thd2))[1:3]<0.005)
+    # adaptive lasso
+    correct.adaptivelasso[i] <- sum(abs(Adaptive.Lasso(beta0, x, y, opt.lam, d, thd1, 0.1))[4:6]<0.005)
+    incorrect.adaptivelasso[i] <- sum(abs(Adaptive.Lasso(beta0, x, y, opt.lam, d, thd1, 0.1))[1:3]<0.005)
+    # aic bic
+    for(j in 1:3){
+      if(!(j %in% Best.Subset(x,y,criterion = 'AIC'))) incorrect.aic[i] = incorrect.aic[i] + 1
+    }
+    for(j in 4:6){
+      if(!(j %in% Best.Subset(x,y,criterion = 'AIC'))) correct.aic[i] = correct.aic[i] + 1
+    }
+    for(j in 1:3){
+      if(!(j %in% Best.Subset(x,y,criterion = 'BIC'))) incorrect.bic[i] = incorrect.bic[i] + 1
+    }
+    for(j in 4:6){
+      if(!(j %in% Best.Subset(x,y,criterion = 'BIC'))) correct.bic[i] = correct.bic[i] + 1
+    }
+  }
+  # 把结果存放在dataframe里做成表格展示
+  result.co <- colMeans(data.frame(correct.lasso.mm, correct.aic, correct.bic, correct.adaptivelasso))
+  result.in <- colMeans(data.frame(incorrect.lasso.mm, incorrect.aic, incorrect.bic, incorrect.adaptivelasso))
+  result <- rbind.data.frame(result.co,result.in)
+  colnames(result) <- c("lasso","aic","bic","adaptive")
+  rownames(result) <- c("correct", "incorrect")
+  return(result)
+}
+```
